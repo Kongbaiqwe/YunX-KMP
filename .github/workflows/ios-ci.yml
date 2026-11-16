@@ -19,7 +19,7 @@ jobs:
           java-version: '21'
 
       - name: Install Gradle 8.13
-            run: |
+        run: |
           curl -sL https://services.gradle.org/distributions/gradle-8.13-bin.zip -o /tmp/gradle-8.13-bin.zip
           unzip -q /tmp/gradle-8.13-bin.zip -d /tmp
           echo "/tmp/gradle-8.13/bin" >> $GITHUB_PATH
