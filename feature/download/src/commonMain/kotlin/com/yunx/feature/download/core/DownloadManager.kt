@@ -1,5 +1,6 @@
 package com.yunx.feature.download.core
 
+import com.yunx.core.common.PlatformLock
 import com.yunx.core.common.currentEpochMillis
 import com.yunx.core.database.dao.DownloadTaskDao
 import com.yunx.core.database.entity.DownloadTaskEntity
@@ -64,7 +65,7 @@ class DownloadManager(
     val activeTaskCount: StateFlow<Int> = _activeTaskCount.asStateFlow()
 
     private val activeJobs = mutableMapOf<Long, CompletableDeferred<Job>>()
-    private val jobsLock = Any()
+    private val jobsLock = PlatformLock()
 
     private val taskEngineIds = mutableMapOf<Long, String>()
     private val inflightLimiter = Semaphore(INFLIGHT_MAX)
@@ -120,24 +121,29 @@ class DownloadManager(
     }
 
     fun start(id: Long, headers: Map<String, String> = emptyMap()) {
-        synchronized(jobsLock) {
-            if (activeJobs.containsKey(id)) return
-            val deferred = CompletableDeferred<Job>()
-            activeJobs[id] = deferred
-
-            val job = scope.launch {
-                try {
-                    _activeTaskCount.value = _activeTaskCount.value + 1
-                    runTask(id, headers)
-                } finally {
-                    synchronized(jobsLock) {
-                        activeJobs.remove(id)
-                    }
-                    _activeTaskCount.value = max(0, _activeTaskCount.value - 1)
-                }
+        val deferred = CompletableDeferred<Job>()
+        val shouldStart = jobsLock.withLock {
+            if (activeJobs.containsKey(id)) {
+                false
+            } else {
+                activeJobs[id] = deferred
+                true
             }
-            deferred.complete(job)
         }
+        if (!shouldStart) return
+
+        val job = scope.launch {
+            try {
+                _activeTaskCount.value = _activeTaskCount.value + 1
+                runTask(id, headers)
+            } finally {
+                jobsLock.withLock {
+                    activeJobs.remove(id)
+                }
+                _activeTaskCount.value = max(0, _activeTaskCount.value - 1)
+            }
+        }
+        deferred.complete(job)
     }
 
     private suspend fun runTask(id: Long, headers: Map<String, String>) = withContext(Dispatchers.IO) {
@@ -243,10 +249,10 @@ class DownloadManager(
     }
 
     suspend fun pause(id: Long) {
-        synchronized(jobsLock) {
-            val deferred = activeJobs.remove(id)
-            deferred?.cancel()
+        val deferred = jobsLock.withLock {
+            activeJobs.remove(id)
         }
+        deferred?.cancel()
         val engineId = taskEngineIds.remove(id)
         if (engineId != null && engine != null) {
             engine.pauseTask(engineId)
