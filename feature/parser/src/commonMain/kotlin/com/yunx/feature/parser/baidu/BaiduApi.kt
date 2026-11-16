@@ -20,6 +20,7 @@ import io.ktor.http.encodeURLParameter
 import io.ktor.http.isSuccess
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlin.concurrent.Volatile
 
 /**
  * 百度网盘 API 封装（KMP / Ktor 3.x + kotlinx.serialization）。
