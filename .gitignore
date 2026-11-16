@@ -1,0 +1,15 @@
+# Gradle / Android build outputs
+build/
+.gradle/
+local.properties
+
+# Xcode / iOS
+*.xcframework
+*.xcuserstate
+xcuserdata/
+DerivedData/
+*.log
+
+# IDE
+.idea/
+.DS_Store
