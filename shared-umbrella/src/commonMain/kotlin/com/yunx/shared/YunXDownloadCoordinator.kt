@@ -1,6 +1,8 @@
 package com.yunx.shared
 
+import com.yunx.core.common.PlatformLock
 import com.yunx.core.database.AppDatabase
+import kotlin.concurrent.Volatile
 import com.yunx.core.database.dao.DownloadTaskDao
 import com.yunx.core.database.entity.DownloadTaskEntity
 import com.yunx.core.database.getAppDatabaseBuilder
@@ -157,10 +159,14 @@ class YunXDownloadCoordinator(
     }
 
     companion object {
+        @Volatile
         private var instance: YunXDownloadCoordinator? = null
+        private val lock = PlatformLock()
 
         fun shared(): YunXDownloadCoordinator {
-            return instance ?: synchronized(this) {
+            val existing = instance
+            if (existing != null) return existing
+            return lock.withLock {
                 instance ?: YunXDownloadCoordinator().also { instance = it }
             }
         }
