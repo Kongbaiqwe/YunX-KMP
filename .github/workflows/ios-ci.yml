@@ -23,7 +23,7 @@ jobs:
           curl -sL https://services.gradle.org/distributions/gradle-8.13-bin.zip -o /tmp/gradle-8.13-bin.zip
           unzip -q /tmp/gradle-8.13-bin.zip -d /tmp
           echo "/tmp/gradle-8.13/bin" >> $GITHUB_PATH
-          gradle --version
+          /tmp/gradle-8.13/bin/gradle --version
                         
       - name: Build SharedKit XCFramework
         run: |
