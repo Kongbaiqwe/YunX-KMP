@@ -1,0 +1,62 @@
+name: iOS CI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  ios-test:
+    runs-on: macos-latest
+    steps:
+      - name: Check out YunX-KMP
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Build SharedKit XCFramework
+        run: |
+          gradle :shared-umbrella:assembleSharedKitXCFramework
+          mkdir -p iosApp/Frameworks
+          XCF=$(find shared-umbrella/build/XCFrameworks -name 'SharedKit.xcframework' -type d | head -n 1)
+          cp -R "$XCF" iosApp/Frameworks/SharedKit.xcframework
+          ls iosApp/Frameworks/SharedKit.xcframework
+
+      - name: Check out Gopeed source
+        uses: actions/checkout@v4
+        with:
+          repository: GopeedLab/gopeed
+          ref: be0a395447d788419e83acdfd693e48a1a1706bf
+          path: gopeed
+
+      - name: Set up Go 1.24
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build Libgopeed XCFramework
+        working-directory: gopeed
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+          go get golang.org/x/mobile/bind
+          gomobile init
+          gomobile bind -tags nosqlite -ldflags="-w -s -checklinkname=0" -o "$GITHUB_WORKSPACE/iosApp/Frameworks/Libgopeed.xcframework" -target=ios github.com/GopeedLab/gopeed/bind/mobile
+          ls "$GITHUB_WORKSPACE/iosApp/Frameworks/Libgopeed.xcframework"
+
+      - name: Run iOS tests on simulator
+        run: |
+          xcodebuild test \
+            -project iosApp/iosApp.xcodeproj \
+            -scheme iosApp \
+            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            CODE_SIGNING_ALLOWED=NO
