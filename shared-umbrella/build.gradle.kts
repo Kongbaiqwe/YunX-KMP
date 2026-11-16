@@ -1,3 +1,5 @@
+import org.jetbrains.kotlin.gradle.plugin.mpp.apple.XCFramework
+
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.kotlin.serialization)
@@ -6,6 +8,7 @@ plugins {
 
 kotlin {
     jvm()
+    val sharedKitXcframework = XCFramework("SharedKit")
     listOf(
         iosX64(),
         iosArm64(),
@@ -19,6 +22,7 @@ kotlin {
             export(project(":core:database"))
             export(project(":feature:parser"))
             export(project(":feature:download"))
+            sharedKitXcframework.add(this)
         }
     }
 
