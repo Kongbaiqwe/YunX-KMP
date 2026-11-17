@@ -150,7 +150,13 @@ class DownloadManager(
         val task = dao.get(id) ?: return@withContext
         if (task.status == STATUS_PAUSED) return@withContext
         val updated = dao.updateStatusIfNot(id, STATUS_DOWNLOADING, STATUS_PAUSED)
+        println("[DownloadManager] taskId=$id updateStatusIfNot returned $updated")
         if (updated == 0) return@withContext
+
+        val parentDir = task.savePath.substringBeforeLast('/', "")
+        if (parentDir.isNotEmpty()) {
+            StoragePlatform.mkdirs(parentDir)
+        }
 
         try {
             // 磁力链接（BT）：直接走 DownloadEngine（Gopeed）
@@ -245,7 +251,9 @@ class DownloadManager(
                     dao.updateStatus(id, STATUS_FAILED)
                 }
             }
-        } catch (_: Throwable) {
+        } catch (e: Throwable) {
+            println("[-] [DownloadManager] task $id execution failed: ${e.message}")
+            e.printStackTrace()
             dao.updateStatus(id, STATUS_FAILED)
         }
     }

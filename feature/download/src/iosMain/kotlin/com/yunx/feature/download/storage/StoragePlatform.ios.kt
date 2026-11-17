@@ -6,6 +6,7 @@ import kotlinx.cinterop.alloc
 import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.ptr
 import kotlinx.cinterop.usePinned
+import platform.Foundation.NSTemporaryDirectory
 import platform.posix.SEEK_SET
 import platform.posix.fclose
 import platform.posix.fopen
@@ -15,17 +16,34 @@ import platform.posix.fwrite
 import platform.posix.mkdir
 import platform.posix.remove
 import platform.posix.stat
+import platform.posix.errno
 
 @OptIn(ExperimentalForeignApi::class)
 actual object StoragePlatform {
     private const val BUFFER_SIZE = 64 * 1024
 
     actual fun getDefaultDownloadDir(): String {
-        return "/tmp/downloads"
+        val tmp = try {
+            NSTemporaryDirectory()
+        } catch (_: Throwable) {
+            "/tmp/"
+        }
+        val base = if (tmp.endsWith("/")) tmp else "$tmp/"
+        val dir = "${base}downloads"
+        mkdirs(dir)
+        return dir
     }
 
     actual fun getTempDownloadDir(): String {
-        return "/tmp/yunx_download_temp"
+        val tmp = try {
+            NSTemporaryDirectory()
+        } catch (_: Throwable) {
+            "/tmp/"
+        }
+        val base = if (tmp.endsWith("/")) tmp else "$tmp/"
+        val dir = "${base}yunx_download_temp"
+        mkdirs(dir)
+        return dir
     }
 
     actual fun fileExists(path: String): Boolean = memScoped {
@@ -43,12 +61,23 @@ actual object StoragePlatform {
     }
 
     actual fun mkdirs(dirPath: String): Boolean {
-        return mkdir(dirPath, 0x1EDu) == 0 // 0755
+        val clean = dirPath.trimEnd('/')
+        if (clean.isEmpty()) return true
+        if (fileExists(clean)) return true
+        val parent = clean.substringBeforeLast('/', "")
+        if (parent.isNotEmpty() && !fileExists(parent)) {
+            mkdirs(parent)
+        }
+        return mkdir(clean, 0x1EDu) == 0 || fileExists(clean)
     }
 
     actual fun openWriter(path: String): PlatformFileWriter {
+        val parent = path.substringBeforeLast('/', "")
+        if (parent.isNotEmpty() && !fileExists(parent)) {
+            mkdirs(parent)
+        }
         val fp = fopen(path, "r+b") ?: fopen(path, "w+b")
-            ?: error("Cannot open file: $path")
+            ?: error("Cannot open file: $path (errno: $errno)")
         return object : PlatformFileWriter {
             override fun seek(position: Long) {
                 fseek(fp, position, SEEK_SET)
@@ -73,7 +102,11 @@ actual object StoragePlatform {
         onProgress: ((Long) -> Unit)?,
         onPartDigest: ((String, String) -> Unit)?
     ): Long {
-        val outFp = fopen(targetPath, "wb") ?: error("Cannot create target: $targetPath")
+        val parent = targetPath.substringBeforeLast('/', "")
+        if (parent.isNotEmpty() && !fileExists(parent)) {
+            mkdirs(parent)
+        }
+        val outFp = fopen(targetPath, "wb") ?: error("Cannot create target: $targetPath (errno: $errno)")
         var total = 0L
         val buffer = ByteArray(BUFFER_SIZE)
 

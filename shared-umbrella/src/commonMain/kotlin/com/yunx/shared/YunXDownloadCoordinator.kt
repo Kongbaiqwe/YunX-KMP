@@ -67,9 +67,18 @@ class YunXDownloadCoordinator(
             when (parsed.platform) {
                 SharePlatform.LANZOU -> {
                     try {
+                        println("[Coordinator] Starting LanzouApi.resolveDownloadLink for ${parsed.originalUrl} (pwd=${parsed.pwd.orEmpty()})")
                         val lanzouLink = LanzouApi().resolveDownloadLink(parsed.originalUrl, parsed.pwd.orEmpty())
-                        if (lanzouLink != null) return lanzouLink
-                    } catch (_: Throwable) {}
+                        if (lanzouLink != null) {
+                            println("[Coordinator] LanzouApi resolved successfully: filename=${lanzouLink.filename}, url=${lanzouLink.downloadUrl}, size=${lanzouLink.size}")
+                            return lanzouLink
+                        } else {
+                            println("[-] [Coordinator] LanzouApi returned null")
+                        }
+                    } catch (e: Throwable) {
+                        println("[-] [Coordinator] LanzouApi failed with exception: ${e.message}")
+                        e.printStackTrace()
+                    }
                 }
                 else -> {
                     // 其他网盘暂未提供公开直链提取器时，返回结构化模型
