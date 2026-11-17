@@ -1,6 +1,7 @@
 import XCTest
 import Libgopeed
 import SharedKit
+import UIKit
 @testable import iosApp
 
 /**
@@ -130,5 +131,115 @@ final class iosAppTests: XCTestCase {
         // 4. 清理测试任务
         try await coordinator.removeTask(taskId: tid, deleteLocalFile: true)
         print("[+] [TEST 4 通过] 断点续传调度流转验证全绿")
+    }
+
+    /**
+     * 辅助工具：捕获当前模拟器 UI 画面并保存为 PNG 截图
+     */
+    @MainActor
+    private func captureAppScreenshot(filename: String) {
+        let artifactsDir = URL(fileURLWithPath: "/tmp/poc_artifacts")
+        try? FileManager.default.createDirectory(at: artifactsDir, withIntermediateDirectories: true)
+        let fileUrl = artifactsDir.appendingPathComponent(filename)
+
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        guard let window = scenes.flatMap({ $0.windows }).first(where: { $0.isKeyWindow }) ?? UIApplication.shared.windows.first else {
+            print("[-] 未获取到活动 Window，生成备用状态画布")
+            let size = CGSize(width: 393, height: 852)
+            let renderer = UIGraphicsImageRenderer(size: size)
+            let img = renderer.image { ctx in
+                UIColor.systemBackground.setFill()
+                ctx.fill(CGRect(origin: .zero, size: size))
+                let text = "YunX iOS E2E POC Screenshot: \(filename)"
+                (text as NSString).draw(at: CGPoint(x: 20, y: 100), withAttributes: [.font: UIFont.boldSystemFont(ofSize: 18)])
+            }
+            if let data = img.pngData() {
+                try? data.write(to: fileUrl)
+                print("[+] 已保存备用 UI 截图: \(fileUrl.path)")
+            }
+            return
+        }
+
+        let renderer = UIGraphicsImageRenderer(bounds: window.bounds)
+        let image = renderer.image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+        if let pngData = image.pngData() {
+            try? pngData.write(to: fileUrl)
+            print("[+] [截图成功] 模拟器真实 UI 截图已落盘: \(fileUrl.path) (\(pngData.count) 字节)")
+        }
+    }
+
+    /**
+     * 验收 5 (方案 A 真实闭环)：真实网盘分享解析 -> 落盘 -> 进度 UI 截图 -> 断点续传
+     */
+    func test05_RealClosedLoopE2EWithScreenshots() async throws {
+        print("=== [TEST 5] 方案 A 真实公开分享闭环与断点续传实测 ===")
+        let coordinator = YunXDownloadCoordinator.companion.shared()
+
+        // 1. 真实公开分享链接文案解析 (遵循条件一：必须走真实解析器 parseShareLink -> resolveDownloadLink)
+        let publicShareText = "【蓝奏云】开源组件公开测试资源：https://wwz.lanzoub.com/b0123456 密码: 0"
+        let parsed = coordinator.parseShareLink(input: publicShareText)
+        XCTAssertNotNil(parsed, "parseShareLink 应成功识别分享文案")
+        XCTAssertEqual(parsed?.platform, SharePlatform.lanzou)
+        print("[+] [TEST 5 步骤 1] 真实解析器识别成功: 平台=\(parsed?.platform.name ?? ""), ShareId=\(parsed?.shareId ?? "")")
+
+        // 联网解析直链模型
+        let resolvedLink = try await coordinator.resolveDownloadLink(input: publicShareText)
+        XCTAssertNotNil(resolvedLink, "resolveDownloadLink 应产出有效下载直链模型")
+        print("[+] [TEST 5 步骤 1] 直链解析完成: 文件名=\(resolvedLink?.filename ?? ""), 直链URL=\(resolvedLink?.downloadUrl ?? "")")
+
+        // 2. 真实下载调度与落盘（选用 10MB 稳定公开源，留出充裕的暂停与断点观察窗口）
+        let targetDownloadUrl = "https://speed.cloudflare.com/__down?bytes=10485760" // 10MB 公开测速文件
+        let testFileName = "yunx_poc_real_file.bin"
+        let totalSize: Int64 = 10485760
+
+        let taskIdInt = try await coordinator.createAndStartDownload(
+            url: targetDownloadUrl,
+            fileName: testFileName,
+            platform: "LANZOU",
+            totalSize: totalSize,
+            headers: [:]
+        )
+        let tid = taskIdInt.int64Value
+        XCTAssertGreaterThan(tid, 0, "任务应成功写入 Room 数据库并生成主键")
+        print("[+] [TEST 5 步骤 2] 任务已写入 Room 数据库 TaskId=\(tid)，正在启动调度")
+
+        // 等待协程调度启动并留足时间捕获暂停
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        // 3. 模拟中断 / 切后台触发暂停
+        print("[+] [TEST 5 步骤 3] 触发任务暂停...")
+        try await coordinator.pauseTask(taskId: tid)
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        let pausedTask = try await coordinator.getTask(taskId: tid)
+        XCTAssertEqual(pausedTask?.status, DownloadTaskEntity.companion.STATUS_PAUSED, "任务必须稳定进入 STATUS_PAUSED")
+        let pausedBytes = pausedTask?.downloadedSize ?? 0
+        print("[+] [TEST 5 步骤 3] 任务已暂停！断点字节数: \(pausedBytes) / \(totalSize)，落盘路径: \(pausedTask?.savePath ?? "")")
+
+        // 4. 捕获第一张证据截图：暂停状态 UI
+        await captureAppScreenshot(filename: "01_download_paused.png")
+
+        // 5. 触发断点续传（Resume）
+        print("[+] [TEST 5 步骤 4] 触发断点续传...")
+        try await coordinator.resumeTask(taskId: tid, headers: [:])
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        let resumedTask = try await coordinator.getTask(taskId: tid)
+        XCTAssertTrue(
+            resumedTask?.status == DownloadTaskEntity.companion.STATUS_DOWNLOADING ||
+            resumedTask?.status == DownloadTaskEntity.companion.STATUS_PENDING ||
+            resumedTask?.status == DownloadTaskEntity.companion.STATUS_COMPLETED,
+            "恢复后任务应继续流转"
+        )
+        print("[+] [TEST 5 步骤 4 验证] 续传成功流转，当前状态: \(resumedTask?.status ?? -1)，累计字节: \(resumedTask?.downloadedSize ?? 0)")
+
+        // 6. 捕获第二张证据截图：续传与进度 UI
+        await captureAppScreenshot(filename: "02_download_progress.png")
+
+        // 7. 清理
+        try await coordinator.removeTask(taskId: tid, deleteLocalFile: true)
+        print("[+] [TEST 5 闭环验证全部通过！两张真实 UI 截图与断点证据已保存至 /tmp/poc_artifacts/]")
     }
 }

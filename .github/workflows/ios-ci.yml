@@ -57,8 +57,16 @@ jobs:
 
       - name: Run iOS tests on simulator
         run: |
+          mkdir -p /tmp/poc_artifacts
           xcodebuild test \
             -project iosApp/iosApp.xcodeproj \
             -scheme iosApp \
             -destination 'platform=iOS Simulator,name=iPhone 17' \
             CODE_SIGNING_ALLOWED=NO
+
+      - name: Upload POC Screenshots and Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-poc-artifacts
+          path: /tmp/poc_artifacts/

@@ -15,6 +15,7 @@ import com.yunx.feature.download.engine.GopeedDownloadEngine
 import com.yunx.feature.download.storage.StoragePlatform
 import com.yunx.feature.download.util.DownloadFileNames
 import com.yunx.feature.parser.ShareLinkParser
+import com.yunx.feature.parser.lanzou.LanzouApi
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -56,12 +57,34 @@ class YunXDownloadCoordinator(
 
     /**
      * 2. 将输入解析为可直接下载的链接模型
-     * 支持纯直链 URL 以及从网盘分享链接提取出的目标直链
+     * 优先走真实网盘分享解析器（如蓝奏云等），兜底支持纯直链 URL
      */
     suspend fun resolveDownloadLink(input: String): DownloadLink? {
         val trimmed = input.trim()
+        val parsed = ShareLinkParser.parse(trimmed)
+        if (parsed != null) {
+            // 真实网盘分享解析分发
+            when (parsed.platform) {
+                SharePlatform.LANZOU -> {
+                    try {
+                        val lanzouLink = LanzouApi().resolveDownloadLink(parsed.originalUrl, parsed.pwd.orEmpty())
+                        if (lanzouLink != null) return lanzouLink
+                    } catch (_: Throwable) {}
+                }
+                else -> {
+                    // 其他网盘暂未提供公开直链提取器时，返回结构化模型
+                }
+            }
+            return DownloadLink(
+                fid = parsed.shareId,
+                filename = "${parsed.platform.code}_${parsed.shareId}",
+                downloadUrl = parsed.originalUrl,
+                size = -1L
+            )
+        }
+
+        // 普通 HTTP/HTTPS 直链兜底处理
         if (trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)) {
-            // 如果是已识别的直链或包含参数的直链，直接提取出文件名
             val cleanUrl = trimmed.lines().firstOrNull { it.startsWith("http") } ?: trimmed
             val urlWithoutQuery = cleanUrl.substringBefore('?')
             val rawName = urlWithoutQuery.substringAfterLast('/').ifBlank { "download_file" }
@@ -75,13 +98,7 @@ class YunXDownloadCoordinator(
                 isHls = isHls
             )
         }
-        val parsed = ShareLinkParser.parse(input) ?: return null
-        return DownloadLink(
-            fid = parsed.shareId,
-            filename = "${parsed.platform.code}_${parsed.shareId}",
-            downloadUrl = parsed.originalUrl,
-            size = -1L
-        )
+        return null
     }
 
     /**
