@@ -38,7 +38,7 @@ class LanzouApi(
             ?: Regex("""['"](/ajaxm\.php)['"]""").find(html)
         val ajaxPath = ajaxPathMatch?.groupValues?.get(1) ?: "/ajaxm.php"
 
-        val domain = targetUrl.substringBefore("/", "https://www.lanzoui.com")
+        val domain = Regex("""^(https?://[^/]+)""").find(targetUrl)?.groupValues?.get(1) ?: "https://www.lanzoui.com"
         val ajaxUrl = if (ajaxPath.startsWith("http")) ajaxPath else "$domain$ajaxPath"
 
         val response = client.post(ajaxUrl) {

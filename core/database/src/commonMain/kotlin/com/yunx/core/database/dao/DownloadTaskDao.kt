@@ -32,6 +32,9 @@ interface DownloadTaskDao {
     @Query("UPDATE download_task SET status = :status WHERE id = :id")
     suspend fun updateStatus(id: Long, status: Int)
 
+    @Query("UPDATE download_task SET status = :newStatus WHERE id = :id AND status != :forbiddenStatus")
+    suspend fun updateStatusIfNot(id: Long, newStatus: Int, forbiddenStatus: Int): Int
+
     @Query("UPDATE download_task SET errorMsg = :errorMsg WHERE id = :id")
     suspend fun updateError(id: Long, errorMsg: String)
 

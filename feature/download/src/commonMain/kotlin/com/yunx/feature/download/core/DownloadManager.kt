@@ -149,7 +149,8 @@ class DownloadManager(
     private suspend fun runTask(id: Long, headers: Map<String, String>) = withContext(Dispatchers.IO) {
         val task = dao.get(id) ?: return@withContext
         if (task.status == STATUS_PAUSED) return@withContext
-        dao.updateStatus(id, STATUS_DOWNLOADING)
+        val updated = dao.updateStatusIfNot(id, STATUS_DOWNLOADING, STATUS_PAUSED)
+        if (updated == 0) return@withContext
 
         try {
             // 磁力链接（BT）：直接走 DownloadEngine（Gopeed）
