@@ -107,6 +107,7 @@ final class iosAppTests: XCTestCase {
             headers: [:]
         )
         let tid = taskId.int64Value
+        try await Task.sleep(nanoseconds: 50_000_000)
 
         // 2. 模拟切后台或网络中断（触发暂停）
         try await coordinator.pauseTask(taskId: tid)

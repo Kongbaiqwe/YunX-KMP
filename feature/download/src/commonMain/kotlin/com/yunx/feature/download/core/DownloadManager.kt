@@ -148,6 +148,7 @@ class DownloadManager(
 
     private suspend fun runTask(id: Long, headers: Map<String, String>) = withContext(Dispatchers.IO) {
         val task = dao.get(id) ?: return@withContext
+        if (task.status == STATUS_PAUSED) return@withContext
         dao.updateStatus(id, STATUS_DOWNLOADING)
 
         try {
