@@ -127,7 +127,7 @@ final class iosAppTests: XCTestCase {
         )
 
         // 4. 清理测试任务
-        coordinator.removeTask(taskId: tid, deleteLocalFile: true)
+        try await coordinator.removeTask(taskId: tid, deleteLocalFile: true)
         print("[+] [TEST 4 通过] 断点续传调度流转验证全绿")
     }
 }
