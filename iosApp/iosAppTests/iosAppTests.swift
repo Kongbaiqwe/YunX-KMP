@@ -197,7 +197,7 @@ final class iosAppTests: XCTestCase {
         let coordinator = YunXDownloadCoordinator.companion.shared()
 
         // 1. 真实公开分享链接文案解析 (遵循条件一：必须走真实解析器 parseShareLink -> resolveDownloadLink)
-        let publicShareText = "【蓝奏云】开源资源测试：https://www.lanzoup.com/b00roqguj 密码: 1234"
+        let publicShareText = "【蓝奏云】inphic.game.mouse.pw1.rar 免密分享：https://wwr.lanzoui.com/iQcpNspli5c"
         let parsed = coordinator.parseShareLink(input: publicShareText)
         XCTAssertNotNil(parsed, "parseShareLink 应成功识别分享文案")
         XCTAssertEqual(parsed?.platform, SharePlatform.lanzou)
@@ -210,7 +210,7 @@ final class iosAppTests: XCTestCase {
 
         // 2. 真实下载调度与落盘（根据小鱼提醒：动态适配 totalSize，若解析出有效真实大小则用真实大小，否则使用 10MB 稳定测速源）
         let (targetDownloadUrl, totalSize): (String, Int64) = {
-            if let link = resolvedLink, link.downloadUrl.hasPrefix("http"), !link.downloadUrl.contains("lanzoup.com"), !link.downloadUrl.contains("lanzoub.com"), link.size > 0 {
+            if let link = resolvedLink, link.downloadUrl.hasPrefix("http"), !link.downloadUrl.contains("lanzoup.com"), !link.downloadUrl.contains("lanzoub.com"), !link.downloadUrl.contains("lanzoui.com"), link.size > 0 {
                 return (link.downloadUrl, link.size)
             } else {
                 return ("https://speed.cloudflare.com/__down?bytes=10485760", 10485760)
@@ -285,6 +285,5 @@ final class iosAppTests: XCTestCase {
         // 9. 清理
         try await coordinator.removeTask(taskId: tid, deleteLocalFile: true)
         print("[+] [TEST 5 方案 A 真实闭环验证全部断言通过！两张物理 UI 截图与实测断点证据全部就绪！]")
-    }
     }
 }
