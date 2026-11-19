@@ -184,11 +184,13 @@ final class iosAppTests: XCTestCase {
         let probeUrl = URL(string: "https://speed.cloudflare.com/__down?bytes=1024")!
         var probeReq = URLRequest(url: probeUrl)
         probeReq.timeoutInterval = 10
+        var preflightOk = false
         do {
             let (probeData, probeResp) = try await URLSession.shared.data(for: probeReq)
             let httpCode = (probeResp as? HTTPURLResponse)?.statusCode ?? 0
             print("[+] [探活成功] 模拟器外网连通正常！HTTP 状态码: \(httpCode), 收到探活数据: \(probeData.count) 字节")
             XCTAssertEqual(httpCode, 200, "模拟器外网探活 HTTP 状态应为 200")
+            preflightOk = httpCode == 200
         } catch {
             print("[-] [探活失败] 模拟器外网异常: \(error.localizedDescription)")
             XCTFail("模拟器外网连通失败: \(error.localizedDescription)")
@@ -284,6 +286,20 @@ final class iosAppTests: XCTestCase {
 
         // 9. 清理
         try await coordinator.removeTask(taskId: tid, deleteLocalFile: true)
-        print("[+] [TEST 5 方案 A 真实闭环验证全部断言通过！两张物理 UI 截图与实测断点证据全部就绪！]")
+        let assertionsPassed = preflightOk
+            && parsed != nil
+            && parsed?.platform == SharePlatform.lanzou
+            && resolvedLink != nil
+            && tid > 0
+            && pausedTask?.status == DownloadTaskEntity.companion.STATUS_PAUSED
+            && pausedBytes > 0
+            && pausedBytes < totalSize
+            && resumedBytes > pausedBytes
+            && finalDownloaded > 0
+        if assertionsPassed {
+            print("[+] [TEST 5 方案 A 真实闭环验证全部断言通过！两张物理 UI 截图与实测断点证据全部就绪！]")
+        } else {
+            print("[-] [TEST 5] 存在断言失败，详见上方 XCTest 输出")
+        }
     }
 }

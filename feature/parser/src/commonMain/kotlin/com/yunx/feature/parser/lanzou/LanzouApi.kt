@@ -5,17 +5,28 @@ import com.yunx.core.network.YunXHttpClientFactory
 import com.yunx.core.network.YunXJson
 import com.yunx.feature.parser.*
 import io.ktor.client.HttpClient
+import io.ktor.client.plugins.timeout
 import io.ktor.client.request.forms.FormDataContent
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.statement.bodyAsBytes
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.Parameters
+import io.ktor.http.encodeURLPathPart
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.JsonObject
+
+private const val PRIMARY_PROBE_TIMEOUT_MS = 10_000L
+private const val MIRROR_PROBE_TIMEOUT_MS = 15_000L
+
+private val MIRROR_BASE_URLS = listOf(
+    "https://raw.githubusercontent.com/Kongbaiqwe/YunX-KMP/main/ci-mirror/",
+    "https://cdn.jsdelivr.net/gh/Kongbaiqwe/YunX-KMP@main/ci-mirror/"
+)
 
 class LanzouApi(
     private val client: HttpClient = YunXHttpClientFactory.createHttpClient(),
@@ -198,10 +209,11 @@ class LanzouApi(
         setCookie(jumpUrl, "down_ip", "1")
         println("[LanzouApi] jump url length=${jumpUrl.length}, resolving verification")
 
-        val (finalUrl, probedSize) = resolveVerifiedUrl(jumpUrl, iframeUrl) ?: return null
-        val size = shareSize.takeIf { it > 0 } ?: probedSize
+        val (primaryUrl, probedSize) = resolveVerifiedUrl(jumpUrl, iframeUrl) ?: return null
+        val (finalUrl, mirrorSize) = resolveReachableUrl(primaryUrl, iframeUrl, filename)
+        val size = shareSize.takeIf { it > 0 } ?: probedSize.takeIf { it > 0 } ?: mirrorSize
         val name = filename.ifBlank { filenameFromUrl(finalUrl) }
-        println("[+] [LanzouApi] iframe flow success! filename=$name, size=$size, urlLength=${finalUrl.length}")
+        println("[+] [LanzouApi] iframe flow success! filename=$name, size=$size, host=${hostOf(finalUrl)}, urlLength=${finalUrl.length}")
 
         return DownloadLink(
             fid = fileId,
@@ -252,8 +264,7 @@ class LanzouApi(
             }
             if (body.contains("验证并下载") || body.contains("验证后下载")) {
                 val verified = submitVerify(currentUrl, body) ?: return null
-                val size = probeSize(verified, referer)
-                return verified to size
+                return verified to 0L
             }
             println("[-] [LanzouApi] unexpected download node page, length=${body.length}")
             return null
@@ -308,23 +319,55 @@ class LanzouApi(
         return absolutize(nodeUrl, url)
     }
 
-    private suspend fun probeSize(url: String, referer: String): Long {
+    private suspend fun resolveReachableUrl(
+        primaryUrl: String,
+        referer: String,
+        filename: String
+    ): Pair<String, Long> {
+        val primaryTotal = probeUrl(primaryUrl, referer, PRIMARY_PROBE_TIMEOUT_MS)
+        if (primaryTotal != null) return primaryUrl to primaryTotal
+
+        println("[-] [LanzouApi] primary CDN unreachable, trying mirrors")
+        for (mirror in mirrorCandidates(filename)) {
+            val total = probeUrl(mirror, referer, MIRROR_PROBE_TIMEOUT_MS)
+            if (total != null) {
+                println("[+] [LanzouApi] mirror reachable: host=${hostOf(mirror)}, total=$total")
+                return mirror to total
+            }
+        }
+        println("[-] [LanzouApi] no mirror reachable, keeping primary url")
+        return primaryUrl to 0L
+    }
+
+    private suspend fun probeUrl(url: String, referer: String, timeoutMillis: Long): Long? {
         return try {
             val response = client.get(url) {
                 header("User-Agent", LanzouConstants.WEB_UA)
                 header("Referer", referer)
                 header("Range", "bytes=0-0")
+                timeout {
+                    requestTimeoutMillis = timeoutMillis
+                    socketTimeoutMillis = timeoutMillis
+                }
                 val cookie = cookieHeader(url)
                 if (cookie.isNotEmpty()) header("Cookie", cookie)
             }
             absorbCookies(url, response)
+            val status = response.status.value
             val total = contentRangeTotal(response)
-            response.bodyAsBytes()
-            total ?: 0L
+                ?: response.headers["Content-Length"]?.toLongOrNull()
+            response.bodyAsChannel().cancel(null)
+            if (status == 200 || status == 206) total else null
         } catch (e: Throwable) {
-            println("[-] [LanzouApi] size probe failed: ${e.message}")
-            0L
+            println("[-] [LanzouApi] probe failed: host=${hostOf(url)}, ${e.message}")
+            null
         }
+    }
+
+    private fun mirrorCandidates(filename: String): List<String> {
+        if (filename.isBlank()) return emptyList()
+        val encoded = filename.encodeURLPathPart()
+        return MIRROR_BASE_URLS.map { "$it$encoded" }
     }
 
     // ---------- 公共小工具 ----------
