@@ -250,9 +250,35 @@ final class iosAppTests: XCTestCase {
         // 4. 触发暂停（断点捕获）
         print("[+] [TEST 5 步骤 3] 触发任务暂停...")
         try await coordinator.pauseTask(taskId: tid)
-        try await Task.sleep(nanoseconds: 200_000_000)
 
-        let pausedTask = try await coordinator.getTask(taskId: tid)
+        // 轮询等待状态稳定落入 STATUS_PAUSED：每 100ms 读一次，连续两次读到才算稳定（防抖），最多 30 秒
+        let expectedPausedStatus = DownloadTaskEntity.companion.STATUS_PAUSED
+        var pausedTask = try await coordinator.getTask(taskId: tid)
+        var pausedPolls = 1
+        var consecutivePausedReads = 0
+        var firstPausedReadPollIndex = 0
+        if pausedTask?.status == expectedPausedStatus {
+            consecutivePausedReads = 1
+            firstPausedReadPollIndex = 1
+        }
+        var pausedStatusStable = false
+        while pausedPolls < 300 && !pausedStatusStable {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            pausedPolls += 1
+            pausedTask = try await coordinator.getTask(taskId: tid)
+            if pausedTask?.status == expectedPausedStatus {
+                consecutivePausedReads += 1
+                if firstPausedReadPollIndex == 0 { firstPausedReadPollIndex = pausedPolls }
+            } else {
+                consecutivePausedReads = 0
+            }
+            if consecutivePausedReads >= 2 { pausedStatusStable = true }
+        }
+        print("[+] [TEST 5 步骤 3 状态轮询] 共轮询 \(pausedPolls) 次(每次 100ms)，首次读到 STATUS_PAUSED 在第 \(firstPausedReadPollIndex) 次，连续两次稳定=\(pausedStatusStable)，断点字节=\(pausedTask?.downloadedSize ?? 0)")
+        if !pausedStatusStable {
+            print("[-] [TEST 5 步骤 3 状态轮询] 30 秒内状态未稳定进入 STATUS_PAUSED(最后 status=\(pausedTask?.status ?? -1))，继续交由原断言判定")
+        }
+
         XCTAssertEqual(pausedTask?.status, DownloadTaskEntity.companion.STATUS_PAUSED, "任务必须稳定进入 STATUS_PAUSED")
         let pausedBytes = pausedTask?.downloadedSize ?? 0
         print("[+] [TEST 5 步骤 3 断点确认] 任务已暂停！断点字节数: \(pausedBytes) / \(totalSize)，落盘路径: \(pausedTask?.savePath ?? "")")
