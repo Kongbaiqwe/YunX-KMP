@@ -459,7 +459,7 @@ class LanzouApi(
                 if (positions[position] == index + 1) real[position] = arg1[index]
             }
         }
-        val shuffled = String(real)
+        val shuffled = real.concatToString()
         return buildString {
             var index = 0
             while (index + 2 <= shuffled.length && index + 2 <= mask.length) {
