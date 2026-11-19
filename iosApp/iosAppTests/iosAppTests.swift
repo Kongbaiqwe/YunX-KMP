@@ -232,16 +232,20 @@ final class iosAppTests: XCTestCase {
         XCTAssertGreaterThan(tid, 0, "任务应成功写入 Room 数据库并生成主键")
         print("[+] [TEST 5 步骤 2] 任务已写入 Room 数据库 TaskId=\(tid)，正在启动下载调度...")
 
-        // 3. 轮询等待真实数据流入（小鱼要求：等到 downloadedSize > 0 再暂停，带超时保护）
+        // 3. 轮询等待真实数据流入（等到 downloadedSize > 0 再暂停，最多等 30 秒）
         var initialBytes: Int64 = 0
-        for _ in 0..<80 { // 最多等待 8 秒
+        for _ in 0..<300 { // 最多等待 30 秒
             try await Task.sleep(nanoseconds: 100_000_000)
             if let t = try await coordinator.getTask(taskId: tid), t.downloadedSize > 0 {
                 initialBytes = t.downloadedSize
                 break
             }
         }
-        print("[+] [TEST 5 步骤 2 验证] 数据已开始流入，当前下载: \(initialBytes) 字节")
+        if initialBytes > 0 {
+            print("[+] [TEST 5 步骤 2 验证] 数据已开始流入，当前下载: \(initialBytes) 字节")
+        } else {
+            print("[-] [TEST 5 步骤 2 验证] 等待首字节超时（30 秒），当前下载仍为 0 字节，继续暂停交由断言判定")
+        }
 
         // 4. 触发暂停（断点捕获）
         print("[+] [TEST 5 步骤 3] 触发任务暂停...")
@@ -300,6 +304,38 @@ final class iosAppTests: XCTestCase {
             print("[+] [TEST 5 方案 A 真实闭环验证全部断言通过！两张物理 UI 截图与实测断点证据全部就绪！]")
         } else {
             print("[-] [TEST 5] 存在断言失败，详见上方 XCTest 输出")
+        }
+    }
+
+    /**
+     * 诊断 6：GitHub 镜像可达性与 Range 支持探针（不参与主下载逻辑）
+     */
+    func test06_MirrorReachable() async throws {
+        print("=== [TEST 6] GitHub 镜像可达性探针 ===")
+        let mirrorUrlString = "https://raw.githubusercontent.com/Kongbaiqwe/YunX-KMP/main/ci-mirror/inphic.game.mouse.pw1.rar"
+        guard let mirrorUrl = URL(string: mirrorUrlString) else {
+            XCTFail("镜像地址无效: \(mirrorUrlString)")
+            return
+        }
+
+        var request = URLRequest(url: mirrorUrl)
+        request.timeoutInterval = 30
+        request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                XCTFail("镜像探针未收到 HTTP 响应")
+                return
+            }
+            let contentRange = httpResponse.value(forHTTPHeaderField: "Content-Range") ?? ""
+            let totalLength = contentRange.split(separator: "/").last.flatMap { Int64(String($0)) } ?? -1
+            print("[+] [TEST 6] 镜像探针响应: HTTP \(httpResponse.statusCode), Content-Range=\(contentRange), 响应体=\(data.count) 字节")
+            XCTAssertEqual(httpResponse.statusCode, 206, "镜像必须支持 Range 请求并返回 206 Partial Content")
+            XCTAssertEqual(totalLength, 18_142_841, "镜像 Content-Range 总长必须为 18142841")
+        } catch {
+            print("[-] [TEST 6] 镜像探针请求失败: \(error.localizedDescription)")
+            XCTFail("镜像探针请求失败: \(error.localizedDescription)")
         }
     }
 }
