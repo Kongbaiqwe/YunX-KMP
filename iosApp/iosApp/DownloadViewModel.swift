@@ -69,6 +69,44 @@ struct TaskUiModel: Identifiable {
 }
 
 /**
+ * 解析首页展示的分享摘要。
+ */
+struct ResolvedShareUiModel {
+    let title: String
+    let platformName: String
+    let sizeText: String
+    let detail: String
+    let warning: String?
+}
+
+/**
+ * 解析结果中的文件行。当前 shared 只返回单个 DownloadLink，
+ * 后续 10.5 接入平台文件浏览后可自然扩展为多文件列表。
+ */
+struct ResolvedFileUiModel: Identifiable {
+    let id: String
+    let fid: String
+    let fileName: String
+    let sizeBytes: Int64
+    let downloadUrl: String
+    let platformCode: String
+    let platformName: String
+    var isSelected: Bool
+    var taskId: Int64?
+
+    var sizeText: String {
+        sizeBytes > 0
+            ? ByteCountFormatter.string(fromByteCount: sizeBytes, countStyle: .file)
+            : "大小未知"
+    }
+
+    func linkedTask(in tasks: [TaskUiModel]) -> TaskUiModel? {
+        guard let taskId else { return nil }
+        return tasks.first { $0.id == taskId }
+    }
+}
+
+/**
  * 端到端下载调度 ViewModel (SwiftUI 响应式状态中心)
  */
 @MainActor
@@ -77,8 +115,13 @@ final class DownloadViewModel: ObservableObject {
     @Published var isEngineReady: Bool = false
     @Published var kmpVersion: String = YunXShared.shared.getVersion()
 
-    @Published var inputLink: String = "https://pan.quark.cn/s/67890abcdef 提取码: 8888"
+    @Published var inputLink: String = ""
     @Published var isProcessing: Bool = false
+    @Published var isParsing: Bool = false
+    @Published var parseErrorMessage: String?
+    @Published var resolvedShare: ResolvedShareUiModel?
+    @Published var resolvedFiles: [ResolvedFileUiModel] = []
+    @Published var startingDownloadIds: Set<String> = []
     @Published var tasks: [TaskUiModel] = []
     @Published var logs: [String] = []
 
@@ -141,7 +184,166 @@ final class DownloadViewModel: ObservableObject {
     }
 
     /**
-     * 解析并启动下载
+     * 解析分享链接，只生成分享详情与文件清单，不自动下载。
+     */
+    func resolveShare() {
+        let rawInput = inputLink.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawInput.isEmpty else {
+            parseErrorMessage = "请先粘贴网盘分享链接或 HTTP 直链。"
+            return
+        }
+
+        isParsing = true
+        parseErrorMessage = nil
+        resolvedShare = nil
+        resolvedFiles = []
+        addLog("开始解析链接（仅解析，不自动下载）: \(rawInput)")
+
+        Task {
+            defer {
+                isParsing = false
+            }
+
+            do {
+                let parsed = coordinator.parseShareLink(input: rawInput)
+                guard let downloadLink = try await coordinator.resolveDownloadLink(input: rawInput) else {
+                    parseErrorMessage = "未能识别这条链接。请确认它是受支持的网盘分享链接或有效的 HTTP/HTTPS 直链。"
+                    addLog("[-] 解析失败：未识别到可下载内容")
+                    return
+                }
+
+                let platformName: String
+                let platformCode: String
+                let detail: String
+                if let parsed {
+                    platformName = parsed.platform.defaultName
+                    platformCode = parsed.platform.code
+                    detail = "分享 ID：\(parsed.shareId)"
+                } else {
+                    platformName = "直接下载"
+                    platformCode = "direct"
+                    detail = "HTTP/HTTPS 直链"
+                }
+
+                var warnings: [String] = []
+                if downloadLink.size <= 0 {
+                    warnings.append("文件大小暂未返回，下载开始后会自动探测。")
+                }
+                if let parsed, downloadLink.downloadUrl == parsed.originalUrl {
+                    warnings.append("该平台暂未返回可直接下载的文件直链，当前仅完成分享页解析；10.5 将补齐平台文件浏览与转存。")
+                }
+
+                let file = ResolvedFileUiModel(
+                    id: "\(platformCode)-\(downloadLink.fid)-\(downloadLink.downloadUrl)",
+                    fid: downloadLink.fid,
+                    fileName: downloadLink.filename,
+                    sizeBytes: downloadLink.size,
+                    downloadUrl: downloadLink.downloadUrl,
+                    platformCode: platformCode,
+                    platformName: platformName,
+                    isSelected: true,
+                    taskId: nil
+                )
+
+                resolvedShare = ResolvedShareUiModel(
+                    title: downloadLink.filename,
+                    platformName: platformName,
+                    sizeText: file.sizeText,
+                    detail: detail,
+                    warning: warnings.isEmpty ? nil : warnings.joined(separator: "\n")
+                )
+                resolvedFiles = [file]
+                addLog("解析成功：文件=\(downloadLink.filename), 平台=\(platformName), 大小=\(downloadLink.size)")
+            } catch {
+                parseErrorMessage = "解析失败：\(error.localizedDescription)"
+                addLog("[-] 解析失败：\(error.localizedDescription)")
+            }
+        }
+    }
+
+    func toggleFileSelection(id: String) {
+        guard let index = resolvedFiles.firstIndex(where: { $0.id == id }) else { return }
+        resolvedFiles[index].isSelected.toggle()
+    }
+
+    func selectAllFiles() {
+        for index in resolvedFiles.indices {
+            resolvedFiles[index].isSelected = true
+        }
+    }
+
+    func clearFileSelection() {
+        for index in resolvedFiles.indices {
+            resolvedFiles[index].isSelected = false
+        }
+    }
+
+    func downloadSelectedFiles() {
+        let ids = resolvedFiles.filter(\.isSelected).map(\.id)
+        download(fileIds: ids)
+    }
+
+    func downloadAllFiles() {
+        download(fileIds: resolvedFiles.map(\.id))
+    }
+
+    func download(fileId: String) {
+        download(fileIds: [fileId])
+    }
+
+    func task(for file: ResolvedFileUiModel) -> TaskUiModel? {
+        file.linkedTask(in: tasks)
+    }
+
+    private func download(fileIds: [String]) {
+        for fileId in fileIds {
+            startDownload(fileId: fileId)
+        }
+    }
+
+    private func startDownload(fileId: String) {
+        guard let index = resolvedFiles.firstIndex(where: { $0.id == fileId }) else { return }
+        guard !startingDownloadIds.contains(fileId) else { return }
+
+        if let taskId = resolvedFiles[index].taskId {
+            if let task = tasks.first(where: { $0.id == taskId }), task.isFailed {
+                resolvedFiles[index].taskId = nil
+            } else {
+                return
+            }
+        }
+
+        let file = resolvedFiles[index]
+        startingDownloadIds.insert(fileId)
+        addLog("准备下载：\(file.fileName)")
+
+        Task {
+            defer {
+                startingDownloadIds.remove(fileId)
+            }
+
+            do {
+                let taskId = try await coordinator.createAndStartDownload(
+                    url: file.downloadUrl,
+                    fileName: file.fileName,
+                    platform: file.platformCode,
+                    totalSize: file.sizeBytes,
+                    headers: [:]
+                )
+
+                if let currentIndex = resolvedFiles.firstIndex(where: { $0.id == fileId }) {
+                    resolvedFiles[currentIndex].taskId = taskId.int64Value
+                }
+                addLog("下载任务已创建并启动，TaskId=\(taskId.int64Value)，文件=\(file.fileName)")
+            } catch {
+                parseErrorMessage = "下载任务创建失败：\(error.localizedDescription)"
+                addLog("[-] 下载任务创建失败：\(error.localizedDescription)")
+            }
+        }
+    }
+
+    /**
+     * 解析并启动下载（保留 POC 调试兼容路径）
      */
     func parseAndDownload() {
         guard !inputLink.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }

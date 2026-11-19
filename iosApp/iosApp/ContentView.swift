@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import SharedKit
 
 private enum AppTab: String, CaseIterable, Identifiable {
@@ -126,6 +127,12 @@ struct ContentView: View {
 private struct ResolveTabView: View {
     @ObservedObject var vm: DownloadViewModel
     @AppStorage("yunx.hasSeenWelcome") private var hasSeenWelcome = false
+    @State private var showsTransferSheet = false
+    @FocusState private var isLinkInputFocused: Bool
+
+    private var selectedCount: Int {
+        vm.resolvedFiles.filter(\.isSelected).count
+    }
 
     var body: some View {
         NavigationStack {
@@ -139,19 +146,26 @@ private struct ResolveTabView: View {
                         }
                     }
 
+                    resolveHeroCard
                     linkInputCard
 
-                    HStack(alignment: .top, spacing: 10) {
-                        Image(systemName: "arrow.turn.down.right")
-                            .foregroundColor(.blue)
-                        Text("解析完成后，任务会自动进入「下载」Tab；运行日志在「设置 > 调试与引擎」中查看。")
-                            .font(.footnote)
-                            .foregroundColor(.secondary)
+                    if let message = vm.parseErrorMessage {
+                        ResolveErrorBanner(message: message)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(14)
-                    .background(Color(.secondarySystemGroupedBackground))
-                    .cornerRadius(12)
+
+                    if vm.isParsing {
+                        parsingCard
+                    }
+
+                    if let share = vm.resolvedShare {
+                        ShareSummaryCard(share: share)
+                    }
+
+                    if !vm.resolvedFiles.isEmpty {
+                        fileListCard
+                    }
+
+                    resolveHintCard
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
@@ -159,57 +173,247 @@ private struct ResolveTabView: View {
             .background(Color(.systemGroupedBackground))
             .navigationTitle("解析")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(action: { showsTransferSheet = true }) {
+                        Label("转存", systemImage: "folder.badge.plus")
+                    }
+                    .accessibilityLabel("转存网盘")
+                }
+            }
+            .sheet(isPresented: $showsTransferSheet) {
+                TransferToCloudSheet(share: vm.resolvedShare, files: vm.resolvedFiles)
+            }
         }
     }
 
-    private var linkInputCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("网盘分享链接 / 直接下载直链")
-                .font(.subheadline)
-                .fontWeight(.bold)
+    private var resolveHeroCard: some View {
+        HStack(alignment: .top, spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.white.opacity(0.18))
+                    .frame(width: 52, height: 52)
+                Image(systemName: "link.badge.plus")
+                    .font(.title2)
+                    .foregroundColor(.white)
+            }
 
-            TextField("粘贴夸克/百度/123/迅雷分享链接或 HTTP 直链...", text: $vm.inputLink, axis: .vertical)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("粘贴分享链接，直达下载")
+                    .font(.title3)
+                    .fontWeight(.bold)
+                    .foregroundColor(.white)
+                Text("支持夸克、百度、123、迅雷、蓝奏等网盘分享文案，也支持 HTTP/HTTPS 直链。")
+                    .font(.footnote)
+                    .foregroundColor(.white.opacity(0.88))
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+        .background(
+            LinearGradient(
+                colors: [Color.blue, Color.indigo],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
+        .cornerRadius(16)
+    }
+
+    private var linkInputCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("分享链接")
+                        .font(.headline)
+                    Text("粘贴整段分享文案，系统会自动提取链接与提取码。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                Button(action: pasteFromClipboard) {
+                    Label("粘贴", systemImage: "doc.on.clipboard")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color.blue.opacity(0.12))
+                        .foregroundColor(.blue)
+                        .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
+            }
+
+            TextField("粘贴网盘分享链接或 HTTP 直链...", text: $vm.inputLink, axis: .vertical)
                 .textFieldStyle(.plain)
-                .lineLimit(2...4)
-                .padding(10)
+                .lineLimit(3...6)
+                .focused($isLinkInputFocused)
+                .padding(12)
                 .background(Color(.tertiarySystemGroupedBackground))
-                .cornerRadius(8)
+                .cornerRadius(10)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(isLinkInputFocused ? Color.blue.opacity(0.55) : Color.clear, lineWidth: 1)
+                )
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
-                    quickFillTag(title: "夸克分享", content: "夸克网盘：https://pan.quark.cn/s/abcdef123456 提取码: 8888")
-                    quickFillTag(title: "10MB测试直链", content: "https://speed.cloudflare.com/__down?bytes=10485760")
-                    quickFillTag(title: "123云盘", content: "https://www.123pan.com/s/123456-abcde 提取码: 1234")
+                    quickFillTag(title: "蓝奏云示例", content: "【蓝奏云】inphic.game.mouse.pw1.rar 免密分享：https://wwr.lanzoui.com/iQcpNspli5c")
+                    quickFillTag(title: "10MB 测试直链", content: "https://speed.cloudflare.com/__down?bytes=10485760")
+                    quickFillTag(title: "夸克分享示例", content: "夸克网盘：https://pan.quark.cn/s/abcdef123456 提取码: 8888")
                 }
             }
 
-            Button(action: { vm.parseAndDownload() }) {
+            Button(action: {
+                isLinkInputFocused = false
+                vm.resolveShare()
+            }) {
                 HStack {
                     Spacer()
-                    if vm.isProcessing {
+                    if vm.isParsing {
                         ProgressView()
                             .tint(.white)
                     } else {
-                        Image(systemName: "arrow.down.doc.fill")
+                        Image(systemName: "magnifyingglass")
                     }
-                    Text(vm.isProcessing ? "正在解析..." : "开始解析并下载")
+                    Text(vm.isParsing ? "正在解析..." : "解析分享")
                         .fontWeight(.semibold)
                     Spacer()
                 }
                 .padding(.vertical, 10)
-                .background(Color.blue)
+                .background(canResolve ? Color.blue : Color.blue.opacity(0.35))
                 .foregroundColor(.white)
                 .cornerRadius(10)
             }
-            .disabled(vm.isProcessing || vm.inputLink.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(!canResolve)
         }
         .padding(14)
         .background(Color(.secondarySystemGroupedBackground))
         .cornerRadius(12)
     }
 
+    private var canResolve: Bool {
+        !vm.isParsing && !vm.inputLink.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var parsingCard: some View {
+        HStack(spacing: 12) {
+            ProgressView()
+                .tint(.blue)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("正在解析分享链接")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                Text("正在请求网盘接口，请稍候…")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+        }
+        .padding(14)
+        .background(Color(.secondarySystemGroupedBackground))
+        .cornerRadius(12)
+    }
+
+    private var fileListCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("文件列表")
+                        .font(.headline)
+                    Text("已选 \(selectedCount) / \(vm.resolvedFiles.count)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                Button(selectedCount == vm.resolvedFiles.count ? "取消全选" : "全选") {
+                    if selectedCount == vm.resolvedFiles.count {
+                        vm.clearFileSelection()
+                    } else {
+                        vm.selectAllFiles()
+                    }
+                }
+                .font(.caption)
+                .fontWeight(.semibold)
+            }
+
+            ForEach(Array(vm.resolvedFiles.enumerated()), id: \.element.id) { index, file in
+                ResolvedFileRow(
+                    file: file,
+                    task: vm.task(for: file),
+                    isStarting: vm.startingDownloadIds.contains(file.id),
+                    onToggle: { vm.toggleFileSelection(id: file.id) },
+                    onDownload: { vm.download(fileId: file.id) }
+                )
+
+                if index < vm.resolvedFiles.count - 1 {
+                    Divider()
+                }
+            }
+
+            HStack(spacing: 10) {
+                Button(action: { vm.downloadSelectedFiles() }) {
+                    Label("下载选中", systemImage: "arrow.down.to.line")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(selectedCount > 0 ? Color.blue : Color.blue.opacity(0.35))
+                        .foregroundColor(.white)
+                        .cornerRadius(10)
+                }
+                .disabled(selectedCount == 0)
+
+                Button(action: { vm.downloadAllFiles() }) {
+                    Label("全部下载", systemImage: "arrow.down.circle.fill")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(Color.blue.opacity(0.12))
+                        .foregroundColor(.blue)
+                        .cornerRadius(10)
+                }
+            }
+        }
+        .padding(14)
+        .background(Color(.secondarySystemGroupedBackground))
+        .cornerRadius(12)
+    }
+
+    private var resolveHintCard: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "arrow.turn.down.right")
+                .foregroundColor(.blue)
+            Text("解析只生成文件清单，不会自动下载。点击下载后任务会进入「下载」Tab，进度会在这里和下载页同步更新。")
+                .font(.footnote)
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(Color(.secondarySystemGroupedBackground))
+        .cornerRadius(12)
+    }
+
+    private func pasteFromClipboard() {
+        guard let text = UIPasteboard.general.string, !text.isEmpty else {
+            vm.parseErrorMessage = "剪贴板为空，请先复制一条分享链接。"
+            return
+        }
+        vm.inputLink = text
+        vm.parseErrorMessage = nil
+    }
+
     private func quickFillTag(title: String, content: String) -> some View {
-        Button(action: { vm.inputLink = content }) {
+        Button(action: {
+            vm.inputLink = content
+            vm.parseErrorMessage = nil
+        }) {
             Text(title)
                 .font(.caption2)
                 .padding(.horizontal, 8)
@@ -217,6 +421,302 @@ private struct ResolveTabView: View {
                 .background(Color.blue.opacity(0.1))
                 .foregroundColor(.blue)
                 .cornerRadius(6)
+        }
+    }
+}
+
+private struct ResolveErrorBanner: View {
+    let message: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundColor(.red)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("操作未完成")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.red)
+                Text(message)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .background(Color.red.opacity(0.08))
+        .cornerRadius(12)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.red.opacity(0.18), lineWidth: 1)
+        )
+    }
+}
+
+private struct ShareSummaryCard: View {
+    let share: ResolvedShareUiModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("分享详情")
+                .font(.headline)
+
+            HStack(alignment: .top, spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.blue.opacity(0.12))
+                        .frame(width: 44, height: 44)
+                    Image(systemName: "doc.fill")
+                        .font(.title3)
+                        .foregroundColor(.blue)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(share.title)
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .lineLimit(2)
+
+                    HStack(spacing: 8) {
+                        Text(share.platformName)
+                            .font(.caption2)
+                            .fontWeight(.semibold)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Color.blue.opacity(0.12))
+                            .foregroundColor(.blue)
+                            .cornerRadius(5)
+
+                        Label(share.sizeText, systemImage: "internaldrive")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            Divider()
+
+            HStack {
+                Text("平台")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Text(share.platformName)
+                    .font(.caption)
+                    .fontWeight(.medium)
+            }
+
+            HStack {
+                Text("大小")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Text(share.sizeText)
+                    .font(.caption)
+                    .fontWeight(.medium)
+            }
+
+            HStack {
+                Text("来源")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Text(share.detail)
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+            }
+
+            if let warning = share.warning {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "info.circle.fill")
+                        .foregroundColor(.orange)
+                    Text(warning)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(10)
+                .background(Color.orange.opacity(0.08))
+                .cornerRadius(8)
+            }
+        }
+        .padding(14)
+        .background(Color(.secondarySystemGroupedBackground))
+        .cornerRadius(12)
+    }
+}
+
+private struct ResolvedFileRow: View {
+    let file: ResolvedFileUiModel
+    let task: TaskUiModel?
+    let isStarting: Bool
+    let onToggle: () -> Void
+    let onDownload: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                Button(action: onToggle) {
+                    Image(systemName: file.isSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.title3)
+                        .foregroundColor(file.isSelected ? .blue : .secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(file.isSelected ? "取消勾选" : "勾选文件")
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(file.fileName)
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .lineLimit(2)
+
+                    HStack(spacing: 8) {
+                        Label(file.sizeText, systemImage: "internaldrive")
+                        Text(file.platformName)
+                    }
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                }
+
+                Spacer(minLength: 0)
+
+                if isStarting {
+                    ProgressView()
+                        .frame(width: 70)
+                } else if let task {
+                    Text(task.statusText)
+                        .font(.caption2)
+                        .fontWeight(.semibold)
+                        .foregroundColor(statusColor(for: task))
+                } else if file.taskId != nil {
+                    Text("已加入下载")
+                        .font(.caption2)
+                        .fontWeight(.semibold)
+                        .foregroundColor(.blue)
+                } else {
+                    Button(action: onDownload) {
+                        Label("下载", systemImage: "arrow.down")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(Color.blue.opacity(0.12))
+                            .foregroundColor(.blue)
+                            .cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            if let task {
+                VStack(spacing: 5) {
+                    ProgressView(value: task.progress)
+                        .tint(task.isCompleted ? .green : (task.isFailed ? .red : (task.isPaused ? .orange : .blue)))
+
+                    HStack {
+                        Text("\(task.downloadedFormatted) / \(task.totalFormatted)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text(String(format: "%.1f%%", task.progress * 100))
+                            .font(.caption2)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func statusColor(for task: TaskUiModel) -> Color {
+        if task.isCompleted { return .green }
+        if task.isFailed { return .red }
+        if task.isPaused { return .orange }
+        if task.isDownloading { return .blue }
+        return .secondary
+    }
+}
+
+private struct TransferToCloudSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let share: ResolvedShareUiModel?
+    let files: [ResolvedFileUiModel]
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 16) {
+                    PlaceholderPanel(
+                        icon: "folder.badge.plus",
+                        title: "转存到网盘",
+                        taskLabel: "任务 10.5 做",
+                        description: "转存入口已接通。网盘选择、目标目录与转存接口将在任务 10.5 完成。"
+                    )
+
+                    if let share {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("本次分享")
+                                .font(.headline)
+                            HStack(alignment: .top) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(share.title)
+                                        .font(.subheadline)
+                                        .fontWeight(.semibold)
+                                        .lineLimit(2)
+                                    Text("\(share.platformName) · \(share.sizeText)")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                Text("\(files.count) 个文件")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(14)
+                        .background(Color(.secondarySystemGroupedBackground))
+                        .cornerRadius(12)
+                    } else {
+                        Text("请先在解析页粘贴并解析一条分享链接。")
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(14)
+                            .background(Color(.secondarySystemGroupedBackground))
+                            .cornerRadius(12)
+                    }
+
+                    Button(action: {}) {
+                        Label("选择转存网盘（10.5 做）", systemImage: "externaldrive.badge.plus")
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 11)
+                            .background(Color.gray.opacity(0.15))
+                            .foregroundColor(.secondary)
+                            .cornerRadius(10)
+                    }
+                    .disabled(true)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+            }
+            .background(Color(.systemGroupedBackground))
+            .navigationTitle("转存网盘")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("关闭") {
+                        dismiss()
+                    }
+                }
+            }
         }
     }
 }
