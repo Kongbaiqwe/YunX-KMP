@@ -522,7 +522,7 @@ final class DownloadViewModel: ObservableObject {
         Task {
             do {
                 let restarted = try await coordinator.redownloadTask(taskId: id)
-                addLog(restarted ? "任务 #\(id) 已重新开始下载" : "任务 #\(id) 不存在，无法重试")
+                addLog(restarted.boolValue ? "任务 #\(id) 已重新开始下载" : "任务 #\(id) 不存在，无法重试")
             } catch {
                 addLog("[-] 任务 #\(id) 重试失败：\(error.localizedDescription)")
             }
