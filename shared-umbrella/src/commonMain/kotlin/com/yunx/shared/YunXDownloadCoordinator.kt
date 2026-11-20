@@ -32,13 +32,22 @@ class YunXDownloadCoordinator(
     val customDownloadDir: String? = null
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val settingsRepository = DownloadSettingsRepository()
 
     val taskDao: DownloadTaskDao = database.downloadTaskDao()
 
     val downloadManager: DownloadManager = DownloadManager(
         dao = taskDao,
         engine = downloadEngine,
-        saveDirProvider = { customDownloadDir ?: StoragePlatform.getDefaultDownloadDir() }
+        saveDirProvider = { customDownloadDir ?: StoragePlatform.getDefaultDownloadDir() },
+        concurrencyProvider = { settingsRepository.maxConcurrentDownloads },
+        engineProvider = {
+            if (settingsRepository.downloadEngine == DownloadSettingsRepository.ENGINE_GOPEED) {
+                downloadEngine
+            } else {
+                null
+            }
+        }
     )
 
     init {
@@ -183,6 +192,21 @@ class YunXDownloadCoordinator(
             "{\"status\":\"running\",\"engine\":\"builtin\"}"
         }
     }
+
+    fun getMaxConcurrentDownloads(): Int = settingsRepository.maxConcurrentDownloads
+
+    fun setMaxConcurrentDownloads(value: Int) {
+        settingsRepository.maxConcurrentDownloads = value
+    }
+
+    fun getDownloadEngine(): String = settingsRepository.downloadEngine
+
+    fun setDownloadEngine(value: String) {
+        settingsRepository.downloadEngine = value
+    }
+
+    fun getDownloadDirectory(): String =
+        customDownloadDir ?: StoragePlatform.getDefaultDownloadDir()
 
     companion object {
         @Volatile

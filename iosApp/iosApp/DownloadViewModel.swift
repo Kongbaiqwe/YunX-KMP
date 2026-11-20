@@ -11,6 +11,7 @@ struct TaskUiModel: Identifiable {
     let fileName: String
     let url: String
     let savePath: String
+    let platform: String
     let downloadedSize: Int64
     let totalSize: Int64
     let status: Int32
@@ -19,10 +20,15 @@ struct TaskUiModel: Identifiable {
     let downloadedFormatted: String
     let totalFormatted: String
 
+    var isPending: Bool { status == DownloadTaskEntity.companion.STATUS_PENDING }
     var isPaused: Bool { status == DownloadTaskEntity.companion.STATUS_PAUSED }
     var isDownloading: Bool { status == DownloadTaskEntity.companion.STATUS_DOWNLOADING }
     var isCompleted: Bool { status == DownloadTaskEntity.companion.STATUS_COMPLETED }
     var isFailed: Bool { status == DownloadTaskEntity.companion.STATUS_FAILED }
+
+    var platformText: String {
+        platform.isEmpty ? "直接下载" : platform.uppercased()
+    }
 
     static func from(entity: DownloadTaskEntity) -> TaskUiModel {
         let total = entity.totalSize
@@ -57,6 +63,7 @@ struct TaskUiModel: Identifiable {
             fileName: entity.fileName.isEmpty ? "未命名文件" : entity.fileName,
             url: entity.url,
             savePath: entity.savePath,
+            platform: entity.platform,
             downloadedSize: downloaded,
             totalSize: total,
             status: entity.status,
@@ -66,6 +73,11 @@ struct TaskUiModel: Identifiable {
             totalFormatted: total > 0 ? ByteCountFormatter.string(fromByteCount: total, countStyle: .file) : "未知大小"
         )
     }
+}
+
+struct TaskSpeedInfo {
+    let bytesPerSecond: Double
+    let etaSeconds: TimeInterval?
 }
 
 /**
@@ -124,22 +136,114 @@ final class DownloadViewModel: ObservableObject {
     @Published var startingDownloadIds: Set<String> = []
     @Published var tasks: [TaskUiModel] = []
     @Published var logs: [String] = []
+    @Published var maxConcurrentDownloads: Int32 = 3
+    @Published var downloadEngine: String = "gopeed"
+    @Published var downloadDirectory: String = ""
+    @Published private(set) var taskSpeeds: [Int64: TaskSpeedInfo] = [:]
 
     private let coordinator = YunXDownloadCoordinator.companion.shared()
     private var observeTask: Task<Void, Never>?
+    private var speedTimer: Timer?
+    private var speedSamples: [Int64: (bytes: Int64, at: Date)] = [:]
 
     init() {
+        loadDownloadSettings()
         startEngineAndLoad()
+        startSpeedSampling()
     }
 
     deinit {
         observeTask?.cancel()
+        speedTimer?.invalidate()
     }
 
     func addLog(_ text: String) {
         let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
         logs.append("[\(timestamp)] \(text)")
         print("[ViewModel] \(text)")
+    }
+
+    private func loadDownloadSettings() {
+        maxConcurrentDownloads = coordinator.getMaxConcurrentDownloads()
+        downloadEngine = coordinator.getDownloadEngine()
+        downloadDirectory = coordinator.getDownloadDirectory()
+    }
+
+    func setMaxConcurrentDownloads(_ value: Int32) {
+        coordinator.setMaxConcurrentDownloads(value: value)
+        maxConcurrentDownloads = coordinator.getMaxConcurrentDownloads()
+        addLog("下载并发上限已更新为 \(maxConcurrentDownloads)")
+    }
+
+    func setDownloadEngine(_ value: String) {
+        coordinator.setDownloadEngine(value: value)
+        downloadEngine = coordinator.getDownloadEngine()
+        addLog("下载引擎偏好已切换为 \(downloadEngine == "builtin" ? "内置分片" : "Gopeed")")
+    }
+
+    private func startSpeedSampling() {
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.updateSpeedSamples()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        speedTimer = timer
+    }
+
+    private func updateSpeedSamples() {
+        let now = Date()
+        var nextSpeeds: [Int64: TaskSpeedInfo] = [:]
+        var nextSamples: [Int64: (bytes: Int64, at: Date)] = [:]
+
+        for task in tasks {
+            let previous = speedSamples[task.id]
+            if task.isDownloading {
+                if let previous {
+                    let elapsed = now.timeIntervalSince(previous.at)
+                    if elapsed >= 0.5 {
+                        let delta = max(0, task.downloadedSize - previous.bytes)
+                        let instant = Double(delta) / elapsed
+                        let oldSpeed = taskSpeeds[task.id]?.bytesPerSecond ?? instant
+                        let smoothed = oldSpeed > 0 ? oldSpeed * 0.55 + instant * 0.45 : instant
+                        let remaining = max(0, task.totalSize - task.downloadedSize)
+                        let eta = smoothed > 1 && remaining > 0 ? Double(remaining) / smoothed : nil
+                        nextSpeeds[task.id] = TaskSpeedInfo(bytesPerSecond: smoothed, etaSeconds: eta)
+                    } else if let existing = taskSpeeds[task.id] {
+                        nextSpeeds[task.id] = existing
+                    }
+                }
+            }
+            nextSamples[task.id] = (task.downloadedSize, now)
+        }
+
+        speedSamples = nextSamples
+        taskSpeeds = nextSpeeds
+    }
+
+    func speedText(for task: TaskUiModel) -> String? {
+        guard task.isDownloading else { return nil }
+        guard let speed = taskSpeeds[task.id]?.bytesPerSecond, speed >= 1 else {
+            return "测速中…"
+        }
+        let value = Int64(speed.rounded())
+        return ByteCountFormatter.string(fromByteCount: value, countStyle: .file) + "/s"
+    }
+
+    func remainingTimeText(for task: TaskUiModel) -> String? {
+        guard task.isDownloading else { return nil }
+        guard let eta = taskSpeeds[task.id]?.etaSeconds, eta > 0 else {
+            return nil
+        }
+        if eta < 60 {
+            return "剩余约 \(Int(ceil(eta))) 秒"
+        }
+        if eta < 3600 {
+            return "剩余约 \(Int(ceil(eta / 60))) 分钟"
+        }
+        let hours = Int(eta / 3600)
+        let minutes = Int((eta.truncatingRemainder(dividingBy: 3600)) / 60)
+        return "剩余约 \(hours) 小时 \(minutes) 分"
     }
 
     /**
@@ -410,6 +514,56 @@ final class DownloadViewModel: ObservableObject {
         addLog("删除任务 #\(id)")
         Task {
             try? await coordinator.removeTask(taskId: id, deleteLocalFile: true)
+        }
+    }
+
+    func retryTask(id: Int64) {
+        addLog("正在重新下载失败任务 #\(id)...")
+        Task {
+            do {
+                let restarted = try await coordinator.redownloadTask(taskId: id)
+                addLog(restarted ? "任务 #\(id) 已重新开始下载" : "任务 #\(id) 不存在，无法重试")
+            } catch {
+                addLog("[-] 任务 #\(id) 重试失败：\(error.localizedDescription)")
+            }
+        }
+    }
+
+    func pauseTasks(ids: Set<Int64>) {
+        let targets = tasks.filter {
+            ids.contains($0.id) && ($0.isDownloading || $0.isPending)
+        }
+        guard !targets.isEmpty else { return }
+        addLog("批量暂停 \(targets.count) 个任务...")
+        Task {
+            for task in targets {
+                try? await coordinator.pauseTask(taskId: task.id)
+            }
+            addLog("批量暂停完成：\(targets.count) 个任务")
+        }
+    }
+
+    func resumeTasks(ids: Set<Int64>) {
+        let targets = tasks.filter { ids.contains($0.id) && $0.isPaused }
+        guard !targets.isEmpty else { return }
+        addLog("批量恢复 \(targets.count) 个任务...")
+        Task {
+            for task in targets {
+                try? await coordinator.resumeTask(taskId: task.id, headers: [:])
+            }
+            addLog("批量恢复完成：\(targets.count) 个任务")
+        }
+    }
+
+    func removeTasks(ids: Set<Int64>) {
+        let targets = tasks.filter { ids.contains($0.id) }
+        guard !targets.isEmpty else { return }
+        addLog("批量删除 \(targets.count) 个任务（含本地文件）...")
+        Task {
+            for task in targets {
+                try? await coordinator.removeTask(taskId: task.id, deleteLocalFile: true)
+            }
+            addLog("批量删除完成：\(targets.count) 个任务")
         }
     }
 

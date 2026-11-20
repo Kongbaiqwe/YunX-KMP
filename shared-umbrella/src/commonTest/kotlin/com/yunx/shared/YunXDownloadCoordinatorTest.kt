@@ -102,4 +102,23 @@ class YunXDownloadCoordinatorTest {
         val info = coord.getEngineInfo()
         assertTrue(info.isNotBlank())
     }
+
+    @Test
+    fun testDownloadSettingsPersistAcrossRepositoryInstances() {
+        val repo = DownloadSettingsRepository()
+        val originalConcurrency = repo.maxConcurrentDownloads
+        val originalEngine = repo.downloadEngine
+
+        try {
+            repo.maxConcurrentDownloads = 5
+            repo.downloadEngine = DownloadSettingsRepository.ENGINE_BUILTIN
+
+            val reloaded = DownloadSettingsRepository()
+            assertEquals(5, reloaded.maxConcurrentDownloads)
+            assertEquals(DownloadSettingsRepository.ENGINE_BUILTIN, reloaded.downloadEngine)
+        } finally {
+            repo.maxConcurrentDownloads = originalConcurrency
+            repo.downloadEngine = originalEngine
+        }
+    }
 }

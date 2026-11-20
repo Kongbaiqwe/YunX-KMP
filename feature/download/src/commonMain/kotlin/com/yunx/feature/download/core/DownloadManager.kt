@@ -24,6 +24,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -45,7 +46,8 @@ class DownloadManager(
     private val saveDirProvider: () -> String? = { null },
     private val concurrencyProvider: () -> Int = { 3 },
     private val speedLimitProvider: () -> Long = { 0L },
-    private val retryCountProvider: () -> Int = { 3 }
+    private val retryCountProvider: () -> Int = { 3 },
+    private val engineProvider: (() -> DownloadEngine?)? = null
 ) {
     companion object {
         const val BUFFER_SIZE = 64 * 1024
@@ -68,6 +70,8 @@ class DownloadManager(
     private val jobsLock = PlatformLock()
 
     private val taskEngineIds = mutableMapOf<Long, String>()
+    private val taskEngines = mutableMapOf<Long, DownloadEngine>()
+    private val engineLock = PlatformLock()
     private val inflightLimiter = Semaphore(INFLIGHT_MAX)
 
     fun resourceDebugSnapshot(): DownloadResourceDebug {
@@ -133,17 +137,38 @@ class DownloadManager(
         if (!shouldStart) return
 
         val job = scope.launch {
+            var slotAcquired = false
             try {
-                _activeTaskCount.value = _activeTaskCount.value + 1
+                acquireTaskSlot()
+                slotAcquired = true
                 runTask(id, headers)
             } finally {
                 jobsLock.withLock {
                     activeJobs.remove(id)
                 }
-                _activeTaskCount.value = max(0, _activeTaskCount.value - 1)
+                if (slotAcquired) {
+                    jobsLock.withLock {
+                        _activeTaskCount.value = max(0, _activeTaskCount.value - 1)
+                    }
+                }
             }
         }
         deferred.complete(job)
+    }
+
+    private suspend fun acquireTaskSlot() {
+        while (true) {
+            val acquired = jobsLock.withLock {
+                if (_activeTaskCount.value < concurrencyProvider().coerceIn(1, 10)) {
+                    _activeTaskCount.value += 1
+                    true
+                } else {
+                    false
+                }
+            }
+            if (acquired) return
+            delay(200)
+        }
     }
 
     private suspend fun runTask(id: Long, headers: Map<String, String>) = withContext(Dispatchers.IO) {
@@ -161,8 +186,9 @@ class DownloadManager(
         try {
             // 磁力链接（BT）：直接走 DownloadEngine（Gopeed）
             if (MagnetLink.isMagnet(task.url) || task.platform == DownloadPlatform.MAGNET) {
-                if (engine != null && engine.isAvailable()) {
-                    val engineId = engine.createTask(
+                val selectedEngine = if (engineProvider != null) engineProvider.invoke() else engine
+                if (selectedEngine != null && selectedEngine.isAvailable()) {
+                    val engineId = selectedEngine.createTask(
                         EngineTaskParams(
                             taskId = id,
                             url = task.url,
@@ -172,6 +198,9 @@ class DownloadManager(
                         )
                     )
                     taskEngineIds[id] = engineId
+                    engineLock.withLock {
+                        taskEngines[id] = selectedEngine
+                    }
                     dao.updateEngineTaskId(id, engineId)
                     return@withContext
                 }
@@ -264,8 +293,10 @@ class DownloadManager(
         }
         deferred?.cancel()
         val engineId = taskEngineIds.remove(id)
-        if (engineId != null && engine != null) {
-            engine.pauseTask(engineId)
+        val taskEngine = engineLock.withLock { taskEngines[id] }
+        val selectedEngine = taskEngine ?: engine
+        if (engineId != null && selectedEngine != null) {
+            selectedEngine.pauseTask(engineId)
         }
         dao.updateStatus(id, STATUS_PAUSED)
     }
@@ -273,8 +304,10 @@ class DownloadManager(
     suspend fun resume(id: Long, headers: Map<String, String> = emptyMap()) {
         dao.updateStatus(id, STATUS_DOWNLOADING)
         val engineId = taskEngineIds[id]
-        if (engineId != null && engine != null) {
-            engine.resumeTask(engineId)
+        val taskEngine = engineLock.withLock { taskEngines[id] }
+        val selectedEngine = taskEngine ?: engine
+        if (engineId != null && selectedEngine != null) {
+            selectedEngine.resumeTask(engineId)
         } else {
             start(id, headers)
         }
@@ -282,6 +315,9 @@ class DownloadManager(
 
     suspend fun remove(id: Long, deleteLocal: Boolean = false) {
         pause(id)
+        engineLock.withLock {
+            taskEngines.remove(id)
+        }
         val task = dao.get(id)
         if (deleteLocal && task != null) {
             StoragePlatform.deleteFile(task.savePath)
